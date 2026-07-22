@@ -205,13 +205,13 @@ fn session_idle_ttl_secs() -> u64 {
 /// fans `fire_session_end` out to the cursor/recording/config cleanup hooks. A
 /// session that keeps issuing tool calls bumps its activity every turn and never
 /// reaches the idle window. Idempotent and cheap.
-fn spawn_session_idle_sweep() {
+fn spawn_session_idle_sweep(registry: std::sync::Arc<cua_driver_core::tool::ToolRegistry>) {
     let ttl = std::time::Duration::from_secs(session_idle_ttl_secs());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             tick.tick().await;
-            let ended = cua_driver_core::session::evict_idle(ttl);
+            let ended = registry.evict_idle_sessions(ttl).await;
             if !ended.is_empty() {
                 tracing::info!(
                     count = ended.len(),
@@ -233,10 +233,9 @@ fn spawn_session_idle_sweep() {
 /// `fire_session_end` caller (the sweep task or an async tool invoke). The EOF
 /// arm keeps its own inline `spawn_blocking` stop for ordered finalize-then-reply;
 /// a second stop here is an idempotent no-op.
-fn register_recording_session_end_hook(
-    recording: std::sync::Arc<cua_driver_core::recording::RecordingSession>,
-) {
-    cua_driver_core::session::register_session_end_hook(move |sid| {
+fn register_recording_session_end_hook(registry: &cua_driver_core::tool::ToolRegistry) {
+    let recording = registry.recording.clone();
+    registry.register_session_end_hook(move |sid| {
         let recording = recording.clone();
         let sid = sid.to_owned();
         std::thread::spawn(move || {
@@ -608,11 +607,11 @@ pub async fn run_serve(
     // so an actively-used session is never reaped.
     let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_unix_secs()));
     spawn_recording_idle_backstop(registry.clone(), last_activity.clone());
-    spawn_session_idle_sweep();
+    spawn_session_idle_sweep(registry.clone());
     if let Some(port) = crate::mcp_http::configured_port() {
         crate::mcp_http::spawn(registry.clone(), port);
     }
-    register_recording_session_end_hook(registry.recording.clone());
+    register_recording_session_end_hook(&registry);
 
     loop {
         tokio::select! {
@@ -748,7 +747,7 @@ pub async fn run_serve(
                                     .and_then(serde_json::Value::as_str)
                                     .filter(|value| !value.is_empty());
                                 let result = if all && session.is_none() {
-                                    let count = cua_driver_core::session::revoke_all_sessions();
+                                    let count = reg.revoke_all_sessions().await;
                                     Ok(serde_json::json!({"revoked": count, "scope": "all"}))
                                 } else if !all {
                                     session.map_or_else(
@@ -823,7 +822,7 @@ pub async fn run_serve(
                                     // fire_session_end, after the mark). stop_owner does
                                     // not consult is_session_ended, so reaping after the
                                     // mark is safe.
-                                    cua_driver_core::session::fire_session_end(sid);
+                                    reg.fire_session_end(sid).await;
                                     let reg2 = reg.clone();
                                     let sid_for_stop = sid.to_owned();
                                     let _ = tokio::task::spawn_blocking(move || {
@@ -870,7 +869,7 @@ pub async fn run_serve(
                         // sees ended=true and bails (mark-before-reap; the cursor/config
                         // hooks already reap inside fire_session_end after the mark).
                         // stop_owner ignores is_session_ended, so reaping after is safe.
-                        cua_driver_core::session::fire_session_end(&sid);
+                        reg.fire_session_end(&sid).await;
                         let reg2 = reg.clone();
                         let sid_for_stop = sid.clone();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -1222,11 +1221,11 @@ pub async fn run_serve(
     // full rationale; the leak (record_video via ffmpeg) is platform-independent.
     let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_unix_secs()));
     spawn_recording_idle_backstop(registry.clone(), last_activity.clone());
-    spawn_session_idle_sweep();
+    spawn_session_idle_sweep(registry.clone());
     if let Some(port) = crate::mcp_http::configured_port() {
         crate::mcp_http::spawn(registry.clone(), port);
     }
-    register_recording_session_end_hook(registry.recording.clone());
+    register_recording_session_end_hook(&registry);
 
     let mut first_pipe = true;
     loop {
@@ -1361,7 +1360,7 @@ pub async fn run_serve(
                                     .and_then(serde_json::Value::as_str)
                                     .filter(|value| !value.is_empty());
                                 let result = if all && session.is_none() {
-                                    let count = cua_driver_core::session::revoke_all_sessions();
+                                    let count = reg.revoke_all_sessions().await;
                                     Ok(serde_json::json!({"revoked": count, "scope": "all"}))
                                 } else if !all {
                                     session.map_or_else(
@@ -1428,7 +1427,7 @@ pub async fn run_serve(
                                     // fire_session_end, after the mark). stop_owner does
                                     // not consult is_session_ended, so reaping after the
                                     // mark is safe.
-                                    cua_driver_core::session::fire_session_end(sid);
+                                    reg.fire_session_end(sid).await;
                                     let reg2 = reg.clone();
                                     let sid_for_stop = sid.to_owned();
                                     let _ = tokio::task::spawn_blocking(move || {
@@ -1466,7 +1465,7 @@ pub async fn run_serve(
                         // sees ended=true and bails (mark-before-reap; the cursor/config
                         // hooks already reap inside fire_session_end after the mark).
                         // stop_owner ignores is_session_ended, so reaping after is safe.
-                        cua_driver_core::session::fire_session_end(&sid);
+                        reg.fire_session_end(&sid).await;
                         let reg2 = reg.clone();
                         let sid_for_stop = sid.clone();
                         let _ = tokio::task::spawn_blocking(move || {
