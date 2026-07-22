@@ -594,6 +594,7 @@ mod tests {
                     "desktop_unlocked": false,
                     "escalation_reason": null,
                     "escalation_detail": null,
+                    "workspace_id": null,
                     "active": true,
                     "revived": false
                 },
@@ -606,6 +607,7 @@ mod tests {
             .start_session(StartSessionInput {
                 session: "run-2".into(),
                 capture_scope: Some(cua_driver_contract::CaptureScope::Auto),
+                workspace_id: None,
             })
             .unwrap();
         assert!(output.active);
