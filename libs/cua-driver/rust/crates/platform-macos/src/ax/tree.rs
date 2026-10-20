@@ -132,7 +132,8 @@ fn role_supports_value_addressing(role: &str) -> bool {
 }
 
 fn is_addressable(actions_present: bool, value_settable: bool, enabled: Option<bool>) -> bool {
-    (actions_present || value_settable) && enabled != Some(false)
+    (actions_present || value_settable)
+        && (enabled != Some(false) || DISABLED_INCLUDED.with(std::cell::Cell::get))
 }
 
 pub struct TreeWalkResult {
@@ -524,7 +525,10 @@ unsafe fn walk_element(
     // A closed submenu can keep its descendants in AXChildren while reporting
     // those controls disabled. Never assign such a row a live element index:
     // the same native state also causes dispatch to refuse it, and exposing an
-    // index for it invites agents to retain an unusable menu target.
+    // index for it invites agents to retain an unusable menu target. A caller
+    // that asks for disabled controls (`include_disabled`) gets them indexed,
+    // with `enabled: false`, so it can read their state and frame; dispatch
+    // still refuses them (`input::ax_actions`).
     let enabled = if !actions.is_empty() || value_settable {
         copy_bool_attr(element, "AXEnabled")
     } else {
@@ -774,6 +778,7 @@ fn format_node_line(node: &AXNode) -> String {
 
 thread_local! {
     static MENUS_COLLAPSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DISABLED_INCLUDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Shown on the menu bar row of a read whose menus were not walked.
@@ -787,6 +792,16 @@ pub fn with_menus_collapsed<T>(collapse: bool, walk: impl FnOnce() -> T) -> T {
     let previous = MENUS_COLLAPSED.with(|flag| flag.replace(collapse));
     let result = walk();
     MENUS_COLLAPSED.with(|flag| flag.set(previous));
+    result
+}
+
+/// Run `walk` with disabled controls indexed (or not) on this thread. Only
+/// `get_window_state` with `include_disabled` indexes them; every other walker
+/// leaves them as display-only rows.
+pub fn with_disabled_included<T>(include: bool, walk: impl FnOnce() -> T) -> T {
+    let previous = DISABLED_INCLUDED.with(|flag| flag.replace(include));
+    let result = walk();
+    DISABLED_INCLUDED.with(|flag| flag.set(previous));
     result
 }
 
@@ -924,6 +939,11 @@ mod tests {
         assert!(is_addressable(true, false, None));
         assert!(!is_addressable(false, false, Some(true)));
         assert!(!is_addressable(true, false, Some(false)));
+        let with_disabled = |actions, settable, enabled| {
+            with_disabled_included(true, || is_addressable(actions, settable, enabled))
+        };
+        assert!(with_disabled(true, false, Some(false)));
+        assert!(!with_disabled(false, false, Some(false)));
 
         for role in [
             "AXTextField",
@@ -999,6 +1019,19 @@ mod lean_row_tests {
                 "- [12] AXStaticText = \"Inbox\"",
             ]
         );
+    }
+
+    #[test]
+    fn disabled_inclusion_is_scoped_to_the_wrapped_walk() {
+        use super::{with_disabled_included, DISABLED_INCLUDED};
+        assert!(!DISABLED_INCLUDED.with(std::cell::Cell::get));
+        let inside = with_disabled_included(true, || {
+            let nested =
+                with_disabled_included(false, || DISABLED_INCLUDED.with(std::cell::Cell::get));
+            (DISABLED_INCLUDED.with(std::cell::Cell::get), nested)
+        });
+        assert_eq!(inside, (true, false));
+        assert!(!DISABLED_INCLUDED.with(std::cell::Cell::get));
     }
 
     #[test]

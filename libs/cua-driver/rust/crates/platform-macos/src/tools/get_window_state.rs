@@ -67,6 +67,10 @@ fn def() -> &'static ToolDef {
                     "minimum": 1,
                     "description": "Cap on walk depth. Default 25."
                 },
+                "include_disabled": {
+                    "type": "boolean",
+                    "description": "Default false: a disabled control gets no [N] and is left out of `elements`. True indexes it like an enabled one, with `enabled: false` and its `frame`, so its state can be read; actions on its token are still refused."
+                },
                 "timeout_ms": cua_driver_core::tool_schema::timeout_ms_schema(),
                 "max_dimension": {
                     "type": "integer",
@@ -279,6 +283,7 @@ impl Tool for GetWindowStateTool {
             .map(|v| v.max(1) as usize)
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
         let timeout_ms = cua_driver_core::tool_schema::resolve_timeout_ms(args.get("timeout_ms"));
+        let include_disabled = args.get("include_disabled").and_then(|v| v.as_bool()) == Some(true);
 
         // A model-facing read lists the menu bar's top-level titles only; a
         // query or full_output walks every menu as before.
@@ -299,13 +304,15 @@ impl Tool for GetWindowStateTool {
             // (dropping a spawn_blocking JoinHandle cannot cancel it).
             let walk_future = tokio::task::spawn_blocking(move || {
                 let tree = crate::ax::tree::with_menus_collapsed(collapse_menus, || {
-                    crate::ax::tree::walk_tree_budgeted(
-                        pid,
-                        Some(window_id),
-                        q.as_deref(),
-                        max_depth,
-                        cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
-                    )
+                    crate::ax::tree::with_disabled_included(include_disabled, || {
+                        crate::ax::tree::walk_tree_budgeted(
+                            pid,
+                            Some(window_id),
+                            q.as_deref(),
+                            max_depth,
+                            cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
+                        )
+                    })
                 });
                 let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
                 (tree, payload)
